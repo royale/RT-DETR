@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 import random 
 import numpy as np 
-from typing import List 
+from typing import Optional, List, Dict
 
 from ...core import register
 
@@ -29,7 +29,7 @@ class RTDETR(nn.Module):
         self.decoder = decoder
         self.encoder = encoder
         
-    def forward(self, x, targets=None):
+    def forward(self, x, targets: Optional[List[Dict[str, torch.Tensor]]] = None):
         x = self.backbone(x)
         x = self.encoder(x)        
         x = self.decoder(x, targets)

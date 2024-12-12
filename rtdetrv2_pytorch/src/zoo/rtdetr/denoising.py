@@ -2,22 +2,25 @@
 """
 
 import torch 
+from typing import Optional, List, Dict
 
 from .utils import inverse_sigmoid
 from .box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 
 
-def get_contrastive_denoising_training_group(targets,
-                                             num_classes,
-                                             num_queries,
-                                             class_embed,
-                                             num_denoising=100,
-                                             label_noise_ratio=0.5,
-                                             box_noise_scale=1.0,):
+def get_contrastive_denoising_training_group(targets: Optional[List[Dict[str, torch.Tensor]]],
+                                             num_classes: int,
+                                             num_queries: int,
+                                             class_embed: torch.nn.Embedding,
+                                             num_denoising: int=100,
+                                             label_noise_ratio: float=0.5,
+                                             box_noise_scale: float=1.0,):
     """cnd"""
     if num_denoising <= 0:
         return None, None, None, None
+
+    assert targets is not None  # make torchscript happy
 
     num_gts = [len(t['labels']) for t in targets]
     device = targets[0]['labels'].device
@@ -73,11 +76,13 @@ def get_contrastive_denoising_training_group(targets,
         known_bbox = torch.clip(known_bbox, min=0.0, max=1.0)
         input_query_bbox = box_xyxy_to_cxcywh(known_bbox)
         input_query_bbox_unact = inverse_sigmoid(input_query_bbox)
+    else:
+        input_query_bbox_unact = None
 
-    input_query_logits = class_embed(input_query_class)
+    input_query_logits = class_embed.forward(input_query_class)
 
     tgt_size = num_denoising + num_queries
-    attn_mask = torch.full([tgt_size, tgt_size], False, dtype=torch.bool, device=device)
+    attn_mask = torch.full([tgt_size, tgt_size], 0, dtype=torch.bool, device=device)
     # match query cannot see the reconstruction
     attn_mask[num_denoising:, :num_denoising] = True
     
@@ -91,10 +96,18 @@ def get_contrastive_denoising_training_group(targets,
             attn_mask[max_gt_num * 2 * i: max_gt_num * 2 * (i + 1), max_gt_num * 2 * (i + 1): num_denoising] = True
             attn_mask[max_gt_num * 2 * i: max_gt_num * 2 * (i + 1), :max_gt_num * 2 * i] = True
         
+    # counts and padded stack to avoid list of tensors
+    dn_positive_counts = [len(x) for x in dn_positive_idx]
+    dn_positive_padded = torch.zeros(len(dn_positive_idx), max(dn_positive_counts), dtype=torch.int64)
+    for i, x in enumerate(dn_positive_idx):
+        dn_positive_padded[i, :len(x)] = x
+
     dn_meta = {
-        "dn_positive_idx": dn_positive_idx,
-        "dn_num_group": num_group,
-        "dn_num_split": [num_denoising, num_queries]
+        # convert all to tensors to avoid heterogeneous types
+        "dn_positive_padded": dn_positive_padded,
+        "dn_positive_counts": torch.tensor(dn_positive_counts),
+        "dn_num_group": torch.tensor(num_group),
+        "dn_num_split": torch.tensor([num_denoising, num_queries])
     }
 
     # print(input_query_class.shape) # torch.Size([4, 196, 256])

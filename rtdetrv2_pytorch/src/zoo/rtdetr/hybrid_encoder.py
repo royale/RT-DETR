@@ -7,6 +7,7 @@ from collections import OrderedDict
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+from typing import List, Optional
 
 from .utils import get_activation
 
@@ -137,10 +138,10 @@ class TransformerEncoderLayer(nn.Module):
         self.activation = get_activation(activation) 
 
     @staticmethod
-    def with_pos_embed(tensor, pos_embed):
+    def with_pos_embed(tensor, pos_embed: Optional[torch.Tensor] = None):
         return tensor if pos_embed is None else tensor + pos_embed
 
-    def forward(self, src, src_mask=None, pos_embed=None) -> torch.Tensor:
+    def forward(self, src, src_mask: Optional[torch.Tensor] = None, pos_embed: Optional[torch.Tensor] = None) -> torch.Tensor:
         residual = src
         if self.normalize_before:
             src = self.norm1(src)
@@ -168,7 +169,7 @@ class TransformerEncoder(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
 
-    def forward(self, src, src_mask=None, pos_embed=None) -> torch.Tensor:
+    def forward(self, src, src_mask: Optional[torch.Tensor] = None, pos_embed: Optional[torch.Tensor] = None) -> torch.Tensor:
         output = src
         for layer in self.layers:
             output = layer(output, src_mask=src_mask, pos_embed=pos_embed)
@@ -193,7 +194,7 @@ class HybridEncoder(nn.Module):
                  enc_act='gelu',
                  use_encoder_idx=[2],
                  num_encoder_layers=1,
-                 pe_temperature=10000,
+                 pe_temperature=10000.,  # float to make torchscript happy
                  expansion=1.0,
                  depth_mult=1.0,
                  act='silu',
@@ -272,7 +273,7 @@ class HybridEncoder(nn.Module):
                 # self.register_buffer(f'pos_embed{idx}', pos_embed)
 
     @staticmethod
-    def build_2d_sincos_position_embedding(w, h, embed_dim=256, temperature=10000.):
+    def build_2d_sincos_position_embedding(w: int, h: int, embed_dim: int = 256, temperature: float = 10000.):
         """
         """
         grid_w = torch.arange(int(w), dtype=torch.float32)
@@ -289,9 +290,18 @@ class HybridEncoder(nn.Module):
 
         return torch.concat([out_w.sin(), out_w.cos(), out_h.sin(), out_h.cos()], dim=1)[None, :, :]
 
-    def forward(self, feats):
+    def forward(self, feats: List[torch.Tensor]):
         assert len(feats) == len(self.in_channels)
-        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
+        # TODO for now handle only 3 channels
+        # it seems difficult/impossible to iterate both on module and feats
+        # https://discuss.pytorch.org/t/runtimeerror-can-not-iterate-over-a-module-list-or-tuple-with-a-value-that-does-not-have-a-statically-determinable-length/118555/2
+        assert len(feats) == 3
+        proj_feats = [
+            self.input_proj[0](feats[0]),
+            self.input_proj[1](feats[1]),
+            self.input_proj[2](feats[2]),
+        ]
+        #proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
         
         # encoder
         if self.num_encoder_layers > 0:
@@ -303,28 +313,71 @@ class HybridEncoder(nn.Module):
                     pos_embed = self.build_2d_sincos_position_embedding(
                         w, h, self.hidden_dim, self.pe_temperature).to(src_flatten.device)
                 else:
-                    pos_embed = getattr(self, f'pos_embed{enc_ind}', None).to(src_flatten.device)
+                    # TODO for now assume only one encoder layer
+                    assert self.use_encoder_idx == [2]
+                    assert enc_ind == 2
+                    pos_embed = getattr(self, 'pos_embed2', None).to(src_flatten.device)
+                    #pos_embed = getattr(self, f'pos_embed{enc_ind}', None).to(src_flatten.device)
 
-                memory :torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
+                # TODO for now assume only one encoder layer
+                assert i == 0
+                memory :torch.Tensor = self.encoder[0](src_flatten, pos_embed=pos_embed)
+                #memory :torch.Tensor = self.encoder[i](src_flatten, pos_embed=pos_embed)
                 proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(-1, self.hidden_dim, h, w).contiguous()
 
         # broadcasting and fusion
         inner_outs = [proj_feats[-1]]
-        for idx in range(len(self.in_channels) - 1, 0, -1):
-            feat_heigh = inner_outs[0]
-            feat_low = proj_feats[idx - 1]
-            feat_heigh = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_heigh)
-            inner_outs[0] = feat_heigh
-            upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')
-            inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))
-            inner_outs.insert(0, inner_out)
+        # TODO ugly unrolled version for torchscript
+        assert len(self.in_channels) == 3
+        # loop idx=2, lat=0
+        idx = 2
+        feat_heigh = inner_outs[0]
+        feat_low = proj_feats[idx - 1]
+        feat_heigh = self.lateral_convs[0](feat_heigh)
+        inner_outs[0] = feat_heigh
+        upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')
+        inner_out = self.fpn_blocks[0](torch.concat([upsample_feat, feat_low], dim=1))
+        inner_outs.insert(0, inner_out)
+        # loop idx=1, lat=1
+        idx = 1
+        feat_heigh = inner_outs[0]
+        feat_low = proj_feats[idx - 1]
+        feat_heigh = self.lateral_convs[1](feat_heigh)
+        inner_outs[0] = feat_heigh
+        upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')
+        inner_out = self.fpn_blocks[1](torch.concat([upsample_feat, feat_low], dim=1))
+        inner_outs.insert(0, inner_out)
+        #for idx in range(len(self.in_channels) - 1, 0, -1):
+        #    feat_heigh = inner_outs[0]
+        #    feat_low = proj_feats[idx - 1]
+        #    feat_heigh = self.lateral_convs[len(self.in_channels) - 1 - idx](feat_heigh)
+        #    inner_outs[0] = feat_heigh
+        #    upsample_feat = F.interpolate(feat_heigh, scale_factor=2., mode='nearest')
+        #    inner_out = self.fpn_blocks[len(self.in_channels)-1-idx](torch.concat([upsample_feat, feat_low], dim=1))
+        #    inner_outs.insert(0, inner_out)
 
         outs = [inner_outs[0]]
-        for idx in range(len(self.in_channels) - 1):
-            feat_low = outs[-1]
-            feat_height = inner_outs[idx + 1]
-            downsample_feat = self.downsample_convs[idx](feat_low)
-            out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1))
-            outs.append(out)
+        # TODO ugly unrolled version for torchscript
+        assert len(self.in_channels) == 3
+        # loop idx=0
+        idx = 0
+        feat_low = outs[-1]
+        feat_height = inner_outs[idx + 1]
+        downsample_feat = self.downsample_convs[0](feat_low)
+        out = self.pan_blocks[0](torch.concat([downsample_feat, feat_height], dim=1))
+        outs.append(out)
+        # loop idx=1
+        idx = 1
+        feat_low = outs[-1]
+        feat_height = inner_outs[idx + 1]
+        downsample_feat = self.downsample_convs[1](feat_low)
+        out = self.pan_blocks[1](torch.concat([downsample_feat, feat_height], dim=1))
+        outs.append(out)
+        #for idx in range(len(self.in_channels) - 1):
+        #    feat_low = outs[-1]
+        #    feat_height = inner_outs[idx + 1]
+        #    downsample_feat = self.downsample_convs[idx](feat_low)
+        #    out = self.pan_blocks[idx](torch.concat([downsample_feat, feat_height], dim=1))
+        #    outs.append(out)
 
         return outs

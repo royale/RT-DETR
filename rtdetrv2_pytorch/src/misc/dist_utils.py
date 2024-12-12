@@ -107,6 +107,7 @@ def get_rank():
 
 
 def get_world_size():
+    return 1  # dist not available: https://github.com/pytorch/pytorch/issues/41353
     if not is_dist_available_and_initialized():
         return 1
     return torch.distributed.get_world_size()

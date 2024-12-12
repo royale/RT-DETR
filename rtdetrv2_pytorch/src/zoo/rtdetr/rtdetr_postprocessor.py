@@ -4,6 +4,7 @@
 import torch 
 import torch.nn as nn 
 import torch.nn.functional as F 
+from typing import Dict
 
 import torchvision
 
@@ -13,7 +14,7 @@ from ...core import register
 __all__ = ['RTDETRPostProcessor']
 
 
-def mod(a, b):
+def mod(a, b: int):
     out = a - a // b * b
     return out
 
@@ -45,7 +46,7 @@ class RTDETRPostProcessor(nn.Module):
         return f'use_focal_loss={self.use_focal_loss}, num_classes={self.num_classes}, num_top_queries={self.num_top_queries}'
     
     # def forward(self, outputs, orig_target_sizes):
-    def forward(self, outputs, orig_target_sizes: torch.Tensor):
+    def forward(self, outputs: Dict[str, torch.Tensor], orig_target_sizes: torch.Tensor):
         logits, boxes = outputs['pred_logits'], outputs['pred_boxes']
         # orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)        
 
@@ -73,11 +74,14 @@ class RTDETRPostProcessor(nn.Module):
         if self.deploy_mode:
             return labels, boxes, scores
 
+        # force deploy mode
+        return labels, boxes, scores
+
         # TODO
-        if self.remap_mscoco_category:
-            from ...data.dataset import mscoco_label2category
-            labels = torch.tensor([mscoco_label2category[int(x.item())] for x in labels.flatten()])\
-                .to(boxes.device).reshape(labels.shape)
+        #if self.remap_mscoco_category:
+        #    from ...data.dataset import mscoco_label2category
+        #    labels = torch.tensor([mscoco_label2category[int(x.item())] for x in labels.flatten()])\
+        #        .to(boxes.device).reshape(labels.shape)
 
         results = []
         for lab, box, sco in zip(labels, boxes, scores):
