@@ -64,6 +64,9 @@ class BasicBlock(nn.Module):
                 ]))
             else:
                 self.short = ConvNormLayer(ch_in, ch_out, 1, stride)
+        # make torchscript happy
+        else:
+            self.short = nn.Identity()
 
         self.branch2a = ConvNormLayer(ch_in, ch_out, 3, stride, act=act)
         self.branch2b = ConvNormLayer(ch_out, ch_out, 3, 1, act=None)
@@ -110,6 +113,9 @@ class BottleNeck(nn.Module):
                 ]))
             else:
                 self.short = ConvNormLayer(ch_in, ch_out * self.expansion, 1, stride)
+        # make torchscript happy
+        else:
+            self.short = nn.Identity()
 
         self.act = nn.Identity() if act is None else get_activation(act) 
 
